@@ -53,23 +53,6 @@ _CONTENT_SELECTORS = [
 ]
 
 
-def _clean_text(text: str) -> str:
-    """
-    Remove excessive whitespace from scraped text.
-
-    Collapses multiple blank lines into single blank lines and strips leading/trailing whitespace.
-    """
-
-    import re
-
-    # Replace 3+ consecutive newlines with exactly 2
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    # Remove lines that are just whitespace
-    lines = [line.rstrip() for line in text.split("\n")]
-
-    return "\n".join(lines).strip()
-
-
 def scrape_article(url: str) -> Article:
     """
     Fetch a URL and extract clean article text.
@@ -134,3 +117,19 @@ def scrape_article(url: str) -> Article:
 
     return Article(url=url, title=title, content=content, domain=domain)
 
+
+def _clean_text(text: str) -> str:
+    """
+    Remove excessive whitespace from scraped text.
+
+    Collapses multiple blank lines into single blank lines and strips leading/trailing whitespace.
+    """
+
+    import re
+
+    # Replace 3+ consecutive newlines with exactly 2
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Remove lines that are just whitespace
+    lines = [line.rstrip() for line in text.split("\n")]
+
+    return "\n".join(lines).strip()
