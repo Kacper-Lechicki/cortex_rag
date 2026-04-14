@@ -1,11 +1,14 @@
 import functools
+import re
 import time
 
 from typing import TypeVar, Callable
+import httpx
 from huggingface_hub import InferenceClient
 from huggingface_hub.errors import HfHubHTTPError, InferenceTimeoutError
 
 from .config import config
+from .logging_utils import get_logger
 
 # TypeVar is used for generic type annotations.
 # F bound to Callable means 'any callable type'.
@@ -36,7 +39,6 @@ def retry(max_attempts: int = 3, base_delay: float = 2.0) -> Callable[[F], F]:
         ...
     """
 
-
     # This is the actual decorator - takes the function to be wrapped
     def decorator(func: F) -> F:
         # functools.wraps copies __name__, __doc__, __annotations__ from func to wrapper.
@@ -49,6 +51,7 @@ def retry(max_attempts: int = 3, base_delay: float = 2.0) -> Callable[[F], F]:
             We forward them unchanged - the wrapper is transparent.
             """
 
+            log = get_logger(__name__)
             last_error: Exception | None = None
 
             for attempt in range(1, max_attempts + 1):
@@ -67,19 +70,36 @@ def retry(max_attempts: int = 3, base_delay: float = 2.0) -> Callable[[F], F]:
                         ) from e
 
                     if attempt < max_attempts:
-                        # Exponential backoff: delay doubles with each attempt
-                        # attempt=1 -> 2s, attempt=2 -> 4s, attempt=3 -> (won't reach)
                         delay = base_delay * (2 ** (attempt - 1))
+                        log.warning(
+                            "Retryable error in %s (attempt %d/%d): %s; sleeping %.0fs",
+                            func.__name__,
+                            attempt,
+                            max_attempts,
+                            e,
+                            delay,
+                        )
 
-                        print(f"    [retry] Attempt {attempt}/{max_attempts} failed: {e}")
-                        print(f"    [retry] Waiting {delay:.0f}s before next attempt...")
+                        time.sleep(delay)
+                except httpx.HTTPError as e:
+                    last_error = e
+
+                    if attempt < max_attempts:
+                        delay = base_delay * (2 ** (attempt - 1))
+                        log.warning(
+                            "HTTP error in %s (attempt %d/%d): %s; sleeping %.0fs",
+                            func.__name__,
+                            attempt,
+                            max_attempts,
+                            e,
+                            delay,
+                        )
 
                         time.sleep(delay)
 
-                # All attempt exhausted
-                raise RuntimeError(
-                    f"All {max_attempts} attempts failed for {func.__name__}"
-                ) from last_error
+            raise RuntimeError(
+                f"All {max_attempts} attempts failed for {func.__name__}"
+            ) from last_error
 
         # The cats here tells type checkers that wrapper has the same signature as func
         return wrapper
@@ -105,12 +125,122 @@ def _get_client() -> InferenceClient:
     global _client
 
     if _client is None:
+        provider = (config.generation_provider or "").strip()
+
+        if provider.lower() in {"openai"}:
+            raise RuntimeError(
+                "HuggingFace client requested but GENERATION_PROVIDER=openai"
+            )
+
+        if not config.hf_token.strip():
+            raise RuntimeError("HF_TOKEN is required when using HuggingFace providers.")
+
         _client = InferenceClient(
-            provider="hf-inference",
-            api_key=config.hf_token
+            provider=provider if provider and provider.lower() != "auto" else None,
+            api_key=config.hf_token,
         )
 
     return _client
+
+
+def _openai_chat_completion(
+    messages: list[dict], max_tokens: int, temperature: float
+) -> str:
+    if not config.openai_api_key.strip():
+        raise RuntimeError("OPENAI_API_KEY is required when GENERATION_PROVIDER=openai")
+
+    url = config.openai_base_url.rstrip("/") + "/chat/completions"
+
+    payload = {
+        "model": config.openai_model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    with httpx.Client(timeout=60.0) as client:
+        r = client.post(
+            url,
+            headers={"Authorization": f"Bearer {config.openai_api_key}"},
+            json=payload,
+        )
+
+        r.raise_for_status()
+        data = r.json()
+
+    try:
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        keys = (
+            sorted(list(data.keys())) if isinstance(data, dict) else type(data).__name__
+        )
+
+        raise RuntimeError(f"Unexpected OpenAI response shape (keys={keys})") from e
+
+
+def _chat_completion(messages: list[dict], max_tokens: int, temperature: float) -> str:
+    provider = (config.generation_provider or "hf-inference").strip().lower()
+
+    if provider == "openai":
+        return _openai_chat_completion(
+            messages, max_tokens=max_tokens, temperature=temperature
+        )
+
+    client = _get_client()
+
+    response = client.chat_completion(
+        model=config.generation_model,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+def _extractive_answer(question: str, context: str) -> str:
+    """
+    Heuristic fallback when a strong LLM isn't available.
+
+    Picks a few sentences from the retrieved context based on token overlap
+    with the question. This is strictly extractive (no hallucinations).
+    """
+
+    q_tokens = [
+        t for t in re.findall(r"[\wąćęłńóśźż]+", question.lower()) if len(t) >= 3
+    ]
+
+    q_keys = {t[:4] for t in q_tokens if len(t) >= 4} | set(q_tokens)
+
+    # Split context into sentences (best-effort).
+    sentences = [
+        s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", context) if s.strip()
+    ]
+
+    scored: list[tuple[int, str]] = []
+
+    for s in sentences:
+        s_tokens = [t for t in re.findall(r"[\wąćęłńóśźż]+", s.lower()) if len(t) >= 3]
+        s_keys = {t[:4] for t in s_tokens if len(t) >= 4} | set(s_tokens)
+        score = len(q_keys & s_keys)
+       
+        if score > 0:
+            scored.append((score, s))
+
+    if not scored:
+        return "I don't have enough information in my knowledge base to answer this."
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    picked: list[str] = []
+
+    for _, s in scored[:3]:
+        if s not in picked:
+            picked.append(s)
+
+    answer = " ".join(picked).strip()
+
+    return answer[:800] if len(answer) > 800 else answer
 
 
 @retry(max_attempts=3, base_delay=2.0)
@@ -129,32 +259,59 @@ def generate_answer(question: str, context: str) -> str:
         Generated answer as a string.
     """
 
-    client = _get_client()
+    if not context.strip():
+        return "I don't have enough information in my knowledge base to answer this."
+
+    # The default hf-inference model is a router and produces low-quality,
+    # often ungrounded answers. In that specific setup, an extractive answer is more reliable.
+    provider = (config.generation_provider or "hf-inference").strip().lower()
+
+    if (
+        provider != "openai"
+        and config.generation_model.strip().lower()
+        == "katanemo/arch-router-1.5b".lower()
+    ):
+        return _extractive_answer(question, context)
+
+    # Keep requests small and predictable; HF inference endpoints can degrade with huge prompts.
+    max_context_chars = 8_000
+
+    context_trimmed = (
+        context if len(context) <= max_context_chars else context[:max_context_chars]
+    )
 
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a helpful assistant that answers questions based ONLY on "
-                "the provided context. If the context does not contain enough "
-                "information to answer the question, respond with: "
-                "'I don't have enough information in my knowledge base to answer this.'"
-            )
+                "You are a precise assistant for retrieval-augmented QA.\n"
+                "Rules:\n"
+                "- Answer using ONLY the provided context.\n"
+                "- If the context is insufficient or does not contain the answer, reply exactly:\n"
+                "  I don't have enough information in my knowledge base to answer this.\n"
+                "- Do not guess. Do not add facts not present in the context.\n"
+                "- Keep the answer short and factual."
+            ),
         },
         {
             "role": "user",
-            "content": f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
-        }
+            "content": f"Context:\n{context_trimmed}\n\nQuestion: {question}\n\nAnswer:",
+        },
     ]
 
-    response = client.chat_completion(
-        model=config.generation_model,
-        messages=messages,
-        max_tokens=512,
-        temperature=0.2 # Low temperature = more factual, less creative
-    )
+    try:
+        return _chat_completion(messages, max_tokens=512, temperature=0.1)
+    except Exception as e:
+        msg = str(e).lower()
 
-    return response.choices[0].message.content.strip()
+        if (
+            "model not supported" in msg
+            or "model_not_supported" in msg
+            or "not supported by provider" in msg
+        ):
+            return _extractive_answer(question, context)
+            
+        raise
 
 
 @retry(max_attempts=2, base_delay=1.0)
@@ -172,31 +329,28 @@ def generate_query_variants(query: str, n: int = 3) -> list[str]:
         List of query strings starting with the original, followed by variants.
     """
 
-    client = _get_client()
-
-    response = client.chat_completion(
-        model=config.generation_model,
+    text = _chat_completion(
         messages=[
             {
                 "role": "system",
-                "content": "Generate diverse search queries. Return ONLY numbered queries, one per line. No explanations."
+                "content": "Generate diverse search queries. Return ONLY numbered queries, one per line. No explanations.",
             },
             {
                 "role": "user",
-                "content": f"Generate {n} different ways to search for information about:\n'{query}'"
-            }
+                "content": f"Generate {n} different ways to search for information about:\n'{query}'",
+            },
         ],
         max_tokens=200,
-        temperature=0.7 # Higher temperature = more diverse variants
+        temperature=0.7,
     )
 
-    variants: list[str] = [query] # Always include the original query first
+    variants: list[str] = [query]  # Always include the original query first
 
-    for line in response.choices[0].message.content.strip().split("\n"):
+    for line in text.strip().split("\n"):
         # Strip leading "1. " or "- " or "• " prefixes
         cleaned = line.strip().lstrip("0123456789.").strip()
 
         if cleaned and len(cleaned) > 5 and cleaned not in variants:
             variants.append(cleaned)
 
-    return variants[: n + 1] # Return at most n+1 items (original + n variants)
+    return variants[: n + 1]  # Return at most n+1 items (original + n variants)

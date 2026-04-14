@@ -1,0 +1,12 @@
+[
+  {
+    "id": "q1",
+    "question": "What is this knowledge base about?",
+    "relevant_source": "https://example.com/article"
+  },
+  {
+    "id": "q2",
+    "question": "Summarize the key points from the ingested content.",
+    "relevant_source": "https://example.com/article"
+  }
+]

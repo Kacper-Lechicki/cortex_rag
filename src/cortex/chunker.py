@@ -18,10 +18,10 @@ class Chunk:
 
     content: str
     metadata: dict[str, str]
+
     # field(default="") means this field has a default value - required for
     # fields after fields without defaults in dataclasses
     chunk_id: str = field(default="")
-
 
     def __post_init__(self) -> None:
         """
@@ -36,7 +36,6 @@ class Chunk:
             # encode() converts str to bytes (required by hashlib)
             # hexdigest() returns hex string representation
             self.chunk_id = hashlib.sha256(self.content.encode()).hexdigest()[:16]
-
 
     def __repr__(self) -> str:
         preview = self.content[:50].replace("\n", " ")
@@ -57,14 +56,14 @@ class TextChunker:
         overlap: Number of characters to overlap between adjacent chunks.
     """
 
-
     def __init__(self, chunk_size: int = 500, overlap: int = 50) -> None:
         if overlap >= chunk_size:
-            raise ValueError(f"overlap ({overlap}) must be less than chunk_size ({chunk_size})")
+            raise ValueError(
+                f"overlap ({overlap}) must be less than chunk_size ({chunk_size})"
+            )
 
         self.chunk_size = chunk_size
         self.overlap = overlap
-
 
     def chunk(self, text: str, metadata: dict[str, str]) -> list[Chunk]:
         """
@@ -85,63 +84,64 @@ class TextChunker:
 
         # List comprehension: build list by filtering and transforming in one expression
         # Equivalent to a for loop with an if condition
-        return [
-            Chunk(content=part, metadata=metadata)
-            for part in raw_parts
-            if len(part.strip()) > 30 # skip fragments that are too short to be useful
-        ]
+        chunks: list[Chunk] = []
 
+        for i, part in enumerate(raw_parts):
+            part = part.strip()
+
+            if len(part) <= 30:
+                continue
+
+            # IDs must be unique within a Chroma collection.
+            # Content-only hashes can collide when overlap produces identical text.
+            source = metadata.get("source", "")
+            chunk_id = hashlib.sha256(f"{source}|{i}|{part}".encode()).hexdigest()[:16]
+            chunks.append(Chunk(content=part, metadata=metadata, chunk_id=chunk_id))
+
+        return chunks
 
     def _split_recursive(self, text: str) -> list[str]:
         """
-        Recursively split text using progressively smaller separators.
+        Split text into chunks, preferring natural boundaries.
 
-        Tries to find a natural split point that keeps chunks within size limit.
+        This is intentionally iterative and near-linear time. The previous
+        recursive splitter could degrade badly on long documents with many
+        separators.
         """
 
-        if len(text) <= self.chunk_size:
-            return [text.strip()]
+        separators = ["\n\n", "\n", ". ", " "]
+        text = text.strip()
 
-        # Try each separator in order of preference
-        for separator in ["\n\n", "\n", ". ", " "]:
-            parts = text.split(separator)
+        if not text:
+            return []
 
-            if len(parts) <= 1:
-                continue # this separator not found, try next
+        out: list[str] = []
+        i = 0
+        n = len(text)
 
-            merged: list[str] = []
-            current = parts[0]
+        while i < n:
+            end = min(i + self.chunk_size, n)
+            window = text[i:end]
 
-            for part in parts[1:]:
-                candidate = current + separator + part
+            split_end = end
 
-                if len(candidate) <= self.chunk_size:
-                    # Still fits - keep building the current chunk
-                    current = candidate
-                else:
-                    # Doesn't fit - save current chunk, start a new one
-                    if current.strip():
-                        merged.append(current.strip())
+            # Prefer a boundary near the end of the window (avoid tiny chunks).
+            min_idx = max(0, int(len(window) * 0.6))
 
-                    # Add overlap: take last N chars of current as start of new chunk
-                    overlap_text = current[-self.overlap:] if self.overlap > 0 else ""
-                    current = (overlap_text + separator + part).strip()
+            for sep in separators:
+                idx = window.rfind(sep)
 
-            if current.strip():
-                merged.append(current.strip())
+                if idx >= min_idx:
+                    split_end = i + idx + len(sep)
+                    break
 
-            # Only accept this split if it actually divided the text
-            if len(merged) > 1:
-                # Recursive: some merged chunks might still be too large
-                result: list[str] = []
+            chunk = text[i:split_end].strip()
 
-                for m in merged:
-                    result.extend(self._split_recursive(m))
+            if chunk:
+                out.append(chunk)
 
-                return result
+            # Move forward, keeping overlap, but ensure progress.
+            next_i = split_end - self.overlap
+            i = max(next_i, i + 1)
 
-        # Last resort: hard cut at chunk_size characters
-        return [
-            text[i : i + self.chunk_size]
-            for  i in range(0, len(text), self.chunk_size - self.overlap)
-        ]
+        return out

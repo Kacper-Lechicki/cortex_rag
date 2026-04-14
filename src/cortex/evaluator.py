@@ -38,7 +38,6 @@ class EvalResult:
     retrieved_sources: list[str]
     relevant_source: str
 
-
     @property
     def reciprocal_rank(self) -> float:
         """
@@ -57,7 +56,6 @@ class EvalResult:
 
         return 0.0
 
-
     @property
     def hit(self) -> bool:
         """
@@ -73,7 +71,7 @@ class EvalResult:
 @dataclass
 class EvalReport:
     """
-    Aggregated evaluation report for a full test set run.
+    Aggregated evaluation report for a full evaluation set run.
 
     Attributes:
         experiment_name: Label for this run (e.g. 'baseline', 'smaller_chunks').
@@ -83,9 +81,9 @@ class EvalReport:
 
     experiment_name: str
     results: list[EvalResult]
+    
     # field(default_factory=dict) means: default value is a new empty dict for each instance.
     config_snapshot: dict = field(default_factory=dict)
-
 
     @property
     def mrr(self) -> float:
@@ -106,7 +104,6 @@ class EvalReport:
 
         return sum(r.reciprocal_rank for r in self.results) / len(self.results)
 
-
     @property
     def hit_rate(self) -> float:
         """
@@ -120,12 +117,11 @@ class EvalReport:
 
         return sum(1 for r in self.results if r.hit) / len(self.results)
 
-
     def to_dict(self) -> dict:
         """
         Serialize report to a JSON-compatible dict.
         """
-        
+
         return {
             "experiment": self.experiment_name,
             "mrr": round(self.mrr, 4),
@@ -133,7 +129,6 @@ class EvalReport:
             "n_queries": len(self.results),
             "config": self.config_snapshot,
         }
-
 
     def save(self, path: Path) -> None:
         """
@@ -151,7 +146,6 @@ class EvalReport:
         with path.open("w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
 
-
     @staticmethod
     def load_all(directory: Path) -> list[dict]:
         """
@@ -166,7 +160,7 @@ class EvalReport:
         Returns:
             List of report dicts, sorted by filename (chronological).
         """
-        
+
         reports = []
 
         # Path.glob() returns a generator of matching paths
@@ -195,11 +189,10 @@ def ndcg_at_k(retrieved_sources: list[str], relevant_source: str, k: int) -> flo
     Returns:
         NDCG score between 0.0 and 1.0.
     """
-    
+
     # Compute DCG: relevance / log2(rank + 1) for each position
     relevances = [
-        1.0 if relevant_source in src else 0.0
-        for src in retrieved_sources[:k]
+        1.0 if relevant_source in src else 0.0 for src in retrieved_sources[:k]
     ]
 
     dcg = sum(
@@ -209,11 +202,9 @@ def ndcg_at_k(retrieved_sources: list[str], relevant_source: str, k: int) -> flo
 
     # Ideal DCG: all relevant results at the top
     ideal_relevances = sorted(relevances, reverse=True)
-    
+
     ideal_dcg = sum(
-        rel / math.log2(rank + 2)
-        for rank, rel in enumerate(ideal_relevances)
+        rel / math.log2(rank + 2) for rank, rel in enumerate(ideal_relevances)
     )
 
     return dcg / ideal_dcg if ideal_dcg > 0 else 0.0
-    

@@ -14,13 +14,13 @@ Question → retriever (+ optional query expansion) → HuggingFace zephyr-7b-be
 - **Embeddings**: `sentence-transformers/all-MiniLM-L6-v2` — runs locally, no API cost
 - **Vector store**: ChromaDB with cosine distance, persisted on disk
 - **Generation**: HuggingFace Inference API (free tier, rate limited)
-- **Evaluation**: MRR and Hit Rate measured from a JSON test set
+- **Evaluation**: MRR and Hit Rate measured from a JSON evaluation set
 
 ## Requirements
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/)
-- HuggingFace account (free) with a read token
+- HuggingFace account (free) with a read token (default), **or** an OpenAI API key (optional)
 
 ## Setup
 
@@ -29,17 +29,32 @@ git clone https://github.com/<your-username>/cortex-rag
 cd cortex-rag
 uv sync
 cp .env.example .env
-# Add your HuggingFace token to .env
+# Configure a generation provider and scraper allowlist in .env
 ```
 
 `.env`:
 ```
+# Required for scraping (SSRF-safe allowlist)
+ALLOWED_DOMAINS="docs.trychroma.com, huggingface.co"
+
+# Option A (default): HuggingFace
+GENERATION_PROVIDER=hf-inference
 HF_TOKEN=hf_your_token_here
+
+# Option B: OpenAI
+# GENERATION_PROVIDER=openai
+# OPENAI_API_KEY=sk-...
+# OPENAI_MODEL=gpt-4o-mini
 ```
 
 ## Usage
 
 ```bash
+# Launch the interactive menu (recommended)
+uv run cortex
+
+# Or run subcommands directly (script-friendly)
+
 # Ingest articles
 uv run cortex add https://huggingface.co/blog/rag https://docs.trychroma.com
 
@@ -64,7 +79,7 @@ uv run cortex info
 Edit `CHUNK_SIZE`, `TOP_K`, `USE_QUERY_EXPANSION` in `.env`, then:
 
 ```bash
-cortex clear && cortex add <urls> && cortex eval --name "experiment_name"
+uv run cortex clear && uv run cortex add <urls> && uv run cortex eval --name "experiment_name"
 cortex viz metrics  # compare all runs side by side
 ```
 
@@ -73,6 +88,7 @@ cortex viz metrics  # compare all runs side by side
 ```
 src/cortex/
 ├── config.py       # pydantic-settings configuration
+├── logging_utils.py # rotating file logger
 ├── scraper.py      # URL → clean text (httpx + BeautifulSoup)
 ├── chunker.py      # recursive character text splitting
 ├── store.py        # ChromaDB with cosine distance

@@ -19,6 +19,9 @@ class SearchResult:
     metadata: dict[str, str]
     distance: float
 
+    @property
+    def chunk_id(self) -> str:
+        return self.metadata.get("chunk_id", "")
 
     @property
     def source(self) -> str:
@@ -27,7 +30,6 @@ class SearchResult:
         """
 
         return self.metadata.get("source", "unknown")
-
 
     @property
     def similarity(self) -> float:
@@ -38,7 +40,6 @@ class SearchResult:
         # ChromaDB returns distance, not similarity.
         # For normalized vectors with cosine space: distance = 1 - cosine_similarity
         return 1.0 - self.distance
-
 
     def __repr__(self) -> str:
         preview = self.content[:40].replace("\n", " ")
@@ -91,8 +92,9 @@ def _retrieve_with_expansion(question: str, k: int) -> list[SearchResult]:
 
     variants = generate_query_variants(question, n=3)
 
-    # Dict mapping a chunk's unique key to its SearchResult object
+    # Dict mapping a stable chunk id to its SearchResult object
     id_to_result: dict[str, SearchResult] = {}
+
     # List of ranked lists (one per query variant)
     all_rankings: list[list[str]] = []
 
@@ -103,11 +105,9 @@ def _retrieve_with_expansion(question: str, k: int) -> list[SearchResult]:
         ranking: list[str] = []
 
         for result in results:
-            # Create a stable key for this chunk: source URL + first 30 chars of content
-            # We can't user chunk_id directly because we only have documents/metadatas back
-            chunk_key = result.source + result.content[:30]
-            id_to_result[chunk_key] = result
-            ranking.append(chunk_key)
+            chunk_id = result.chunk_id or (result.source + "|" + result.content[:50])
+            id_to_result[chunk_id] = result
+            ranking.append(chunk_id)
 
         all_rankings.append(ranking)
 
@@ -117,10 +117,7 @@ def _retrieve_with_expansion(question: str, k: int) -> list[SearchResult]:
     return [id_to_result[key] for key in fused_keys if key in id_to_result]
 
 
-def _reciprocal_rank_fusion(
-    rankings: list[list[str]],
-    k: int = 60
-) -> list[str]:
+def _reciprocal_rank_fusion(rankings: list[list[str]], k: int = 60) -> list[str]:
     """
     Merge multiple ranked result lists using Reciprocal Rank Fusion.
 
@@ -170,4 +167,3 @@ def _parse_raw_results(raw: dict) -> list[SearchResult]:
         SearchResult(content=doc, metadata=meta, distance=dist)
         for doc, meta, dist in zip(documents, metadatas, distances)
     ]
-    

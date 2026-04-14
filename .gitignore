@@ -1,10 +1,12 @@
 # Custom
-docs/INSTRUCTIONS.md
 .chroma/
-*.pyc
 .DS_Store
-data/eval/results/
-cortex_*.png
+data/
+logs/
+.cortex.log*
+.claude/
+.cursor/
+docs/INSTRUCTIONS.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -44,7 +46,7 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Unit test / coverage reports
+# Coverage reports
 htmlcov/
 .tox/
 .nox/
@@ -56,7 +58,6 @@ coverage.xml
 *.cover
 *.py.cover
 .hypothesis/
-.pytest_cache/
 cover/
 
 # Translations

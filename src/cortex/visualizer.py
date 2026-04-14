@@ -9,15 +9,15 @@ from sklearn.manifold import TSNE
 _BG_COLOR = "#1a1a2e"
 _TEXT_COLOR = "#e0e0e0"
 
-_BAR_COLORS = [
-    "#4cc9f0", "f72585", "#7209b7", "#3a0ca3", "#4361ee"
-]
+_VISUALS_DIR = Path("data/visuals")
+
+_BAR_COLORS = ["#4cc9f0", "#f72585", "#7209b7", "#3a0ca3", "#4361ee"]
 
 
 def visualize_documents(
     embeddings: list[list[float]],
     metadatas: list[dict],
-    output_path: Path = Path("cortex_docs.png")
+    output_path: Path = _VISUALS_DIR / "cortex_docs.png",
 ) -> Path:
     """
     Create a t-SNE scatter plot of all document embeddings.
@@ -51,16 +51,16 @@ def visualize_documents(
 
     # t-SNE hyperparameters:
     # - perplexity: rougly "number of neighbours" - lower for small datasets
-    # - n_iter: optimization steps - 1000 is usually enough for convergence
+    # - max_iter: optimization steps - 1000 is usually enough for convergence
     # - random_state: seed for reproducibility
     perplexity = min(30, n - 1)
 
     tsne = TSNE(
         n_components=2,
         perplexity=perplexity,
-        n_iter=1000,
+        max_iter=1000,
         random_state=42,
-        init="pca" # PCA initialization is more stable than random
+        init="pca",  # PCA initialization is more stable than random
     )
 
     # fit_transform: fits the model AND returns the 2D coordinates
@@ -80,18 +80,17 @@ def visualize_documents(
 
     # Scatter plot: one point per chunk
     ax.scatter(
-        coords_2d[:, 0],   # x coordinates (all rows, column 0)
-        coords_2d[:, 1],   # y coordinates (all rows, column 1)
+        coords_2d[:, 0],  # x coordinates (all rows, column 0)
+        coords_2d[:, 1],  # y coordinates (all rows, column 1)
         c=point_colors,
-        s=10,              # point size
-        alpha=0.75,        # slight transparency for overlapping points
+        s=10,  # point size
+        alpha=0.75,  # slight transparency for overlapping points
         linewidths=0,
     )
 
     # Legend: one entry per domain
     legend_patches = [
-        mpatches.Patch(color=domain_to_color[d], label=d)
-        for d in unique_domains
+        mpatches.Patch(color=domain_to_color[d], label=d) for d in unique_domains
     ]
 
     ax.legend(
@@ -116,6 +115,9 @@ def visualize_documents(
         spine.set_edgecolor("#333344")
 
     plt.tight_layout()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor=_BG_COLOR)
     plt.close(fig)  # Release memory — important for long-running processes
 
@@ -124,7 +126,7 @@ def visualize_documents(
 
 def visualize_metrics(
     reports: list[dict],
-    output_path: Path = Path("cortex_metrics.png"),
+    output_path: Path = _VISUALS_DIR / "cortex_metrics.png",
 ) -> Path:
     """
     Create a grouped bar chart comparing MRR and Hit Rate across experiments.
@@ -147,7 +149,6 @@ def visualize_metrics(
     experiment_names = [r["experiment"] for r in reports]
     mrr_scores = [r["mrr"] for r in reports]
     hit_rate_scores = [r["hit_rate"] for r in reports]
-    n_queries = [r.get("n_queries", "?") for r in reports]
 
     # x: array of integer positions [0, 1, 2, ...]
     x = np.arange(len(experiment_names))
@@ -158,13 +159,21 @@ def visualize_metrics(
 
     # Two groups of bars: MRR (left offset) and Hit Rate (right offset)
     bars_mrr = ax.bar(
-        x - bar_width / 2, mrr_scores, bar_width,
-        label="MRR", color=_BAR_COLORS[0], alpha=0.9,
+        x - bar_width / 2,
+        mrr_scores,
+        bar_width,
+        label="MRR",
+        color=_BAR_COLORS[0],
+        alpha=0.9,
     )
 
     bars_hr = ax.bar(
-        x + bar_width / 2, hit_rate_scores, bar_width,
-        label="Hit Rate", color=_BAR_COLORS[1], alpha=0.9,
+        x + bar_width / 2,
+        hit_rate_scores,
+        bar_width,
+        label="Hit Rate",
+        color=_BAR_COLORS[1],
+        alpha=0.9,
     )
 
     # Add score labels on top of each bar
@@ -193,15 +202,22 @@ def visualize_metrics(
     ax.set_xticks(x)
     ax.set_xticklabels(experiment_names, rotation=20, ha="right", color=_TEXT_COLOR)
     ax.set_ylabel("Score", color=_TEXT_COLOR)
-    ax.set_title("RAG Evaluation — Experiment Comparison", color=_TEXT_COLOR, fontsize=13, pad=14)
+
+    ax.set_title(
+        "RAG Evaluation — Experiment Comparison", color=_TEXT_COLOR, fontsize=13, pad=14
+    )
+
     ax.legend(framealpha=0.2, labelcolor=_TEXT_COLOR)
     ax.tick_params(colors=_TEXT_COLOR)
     ax.yaxis.label.set_color(_TEXT_COLOR)
-    
+
     for spine in ax.spines.values():
         spine.set_edgecolor("#333344")
 
     plt.tight_layout()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
     plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor=_BG_COLOR)
     plt.close(fig)
 
