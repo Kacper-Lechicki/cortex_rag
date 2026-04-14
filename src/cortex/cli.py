@@ -1,4 +1,5 @@
 import typer
+import warnings
 
 from pathlib import Path
 from typing import Optional
@@ -14,6 +15,52 @@ app = typer.Typer(
 )
 
 console = Console()
+
+# Some heavy deps (e.g. Chroma/ML runtimes) can trigger Python's multiprocessing
+# `resource_tracker` warning about leaked semaphores at interpreter shutdown.
+# This is noisy but typically harmless for CLI users; filter it narrowly.
+warnings.filterwarnings(
+    "ignore",
+    message=r"resource_tracker: There appear to be \d+ leaked semaphore objects to clean up at shutdown",
+    category=UserWarning,
+    module=r"multiprocessing\.resource_tracker",
+)
+
+
+def _format_retrieval_context(results: list) -> str:
+    """
+    Format retrieved chunks into a citation-friendly context block.
+
+    We include per-chunk URL + title so the generator can ground and cite.
+    """
+
+    blocks: list[str] = []
+
+    # Keep individual chunks reasonably small to avoid blowing up the prompt.
+    # (The generator also enforces its own overall cap.)
+    max_chunk_chars = 1_800
+
+    for i, r in enumerate(results, start=1):
+        md = getattr(r, "metadata", {}) or {}
+        title = (md.get("title") or "").strip()
+        url = (md.get("source") or getattr(r, "source", "") or "").strip()
+        domain = (md.get("domain") or "").strip()
+
+        header_parts = [f"[Chunk {i}]"]
+        if title:
+            header_parts.append(f"Title: {title}")
+        if domain:
+            header_parts.append(f"Domain: {domain}")
+        if url:
+            header_parts.append(f"URL: {url}")
+
+        content = (getattr(r, "content", "") or "").strip()
+        if len(content) > max_chunk_chars:
+            content = content[:max_chunk_chars].rstrip() + "…"
+
+        blocks.append("\n".join([" | ".join(header_parts), content]))
+
+    return "\n\n---\n\n".join(blocks).strip()
 
 
 def _ensure_questions_file(path: Path) -> bool:
@@ -269,11 +316,11 @@ def _run_menu() -> None:
             continue
 
         if choice == "4":
-            _viz_docs(Path("data/visuals/cortex_docs.png"))
+            _viz_docs(Path("data/visuals/cortex_docs.png"), show=True)
             continue
 
         if choice == "5":
-            _viz_metrics(Path("data/visuals/cortex_metrics.png"))
+            _viz_metrics(Path("data/visuals/cortex_metrics.png"), show=True)
             continue
 
         if choice == "6":
@@ -295,7 +342,7 @@ def _run_menu() -> None:
                 console.print("[dim]Aborted.[/dim]")
                 continue
             try:
-                eval(questions_file=Path(q_path), name=name, save=save)
+                evaluate(questions_file=Path(q_path), name=name, save=save)
             except Exception as e:
                 console.print(f"[red]Eval failed:[/red] {e}")
 
@@ -657,7 +704,7 @@ def ask() -> None:
             console.print("[yellow]No relevant content found.[/yellow]")
             continue
 
-        context = "\n\n---\n\n".join(r.content for r in results)
+        context = _format_retrieval_context(results)
 
         with console.status("[dim]Generating answer...[/dim]", spinner="dots"):
             answer = generate_answer(question, context)
@@ -682,7 +729,38 @@ def ask() -> None:
 
 
 @app.command()
-def eval(
+def clear() -> None:
+    """
+    Delete the knowledge base. You will need to re-run 'cortex add'.
+    """
+
+    import shutil
+
+    from .config import config
+    from .store import count, reset_store
+
+    if not config.chroma_path.exists():
+        console.print("[dim]No knowledge base to clear.[/dim]")
+        return
+
+    n = count()
+
+    confirm = typer.confirm(
+        f"Delete knowledge base ({n} chunks)? This cannot be undone.",
+        default=False,
+    )
+
+    if confirm:
+        # Ensure we don't keep a stale, open handle to a deleted store.
+        reset_store()
+        shutil.rmtree(config.chroma_path)
+        console.print("[green]Knowledge base cleared.[/green]")
+    else:
+        console.print("[dim]Aborted.[/dim]")
+
+
+@app.command("eval")
+def evaluate(
     questions_file: Path = typer.Option(
         Path("data/eval/questions.json"),
         "--questions",
@@ -793,15 +871,20 @@ def viz(
     output: Optional[Path] = typer.Option(
         None, "--output", "-o", help="Output PNG path."
     ),
+    show: bool = typer.Option(
+        True,
+        "--show/--no-show",
+        help="Render the generated image in the terminal when supported.",
+    ),
 ) -> None:
     """
     Generate visualizations: document map (t-SNE) or metrics comparison.
     """
 
     if what == "docs":
-        _viz_docs(output or Path("data/visuals/cortex_docs.png"))
+        _viz_docs(output or Path("data/visuals/cortex_docs.png"), show=show)
     elif what == "metrics":
-        _viz_metrics(output or Path("data/visuals/cortex_metrics.png"))
+        _viz_metrics(output or Path("data/visuals/cortex_metrics.png"), show=show)
     else:
         console.print(
             f"[red]Unknown option:[/red] '{what}'. Choose 'docs' or 'metrics'."
@@ -810,7 +893,27 @@ def viz(
         raise typer.Exit(1)
 
 
-def _viz_docs(output: Path) -> None:
+def _try_render_image_in_terminal(path: Path) -> None:
+    if not console.is_terminal:
+        return
+
+    try:
+        # `rich` itself doesn't ship image rendering; use rich-pixels if installed.
+        from PIL import Image  # type: ignore[import-not-found]
+        from rich_pixels import Pixels  # type: ignore[import-not-found]
+    except Exception:
+        return
+
+    try:
+        with Image.open(path) as im:
+            # Keep a sensible width for typical terminals.
+            console.print(Pixels.from_image(im, width=100))
+    except Exception:
+        # Rendering is best-effort; path output is still printed by caller.
+        return
+
+
+def _viz_docs(output: Path, show: bool) -> None:
     from .store import collection_exists, get_all_for_visualization
     from .visualizer import visualize_documents
 
@@ -828,8 +931,11 @@ def _viz_docs(output: Path) -> None:
 
     console.print(f"[green]✓[/green] Saved: [bold]{path}[/bold]")
 
+    if show:
+        _try_render_image_in_terminal(Path(path))
 
-def _viz_metrics(output: Path) -> None:
+
+def _viz_metrics(output: Path, show: bool) -> None:
     from .evaluator import EvalReport
     from .visualizer import visualize_metrics
 
@@ -845,6 +951,9 @@ def _viz_metrics(output: Path) -> None:
 
     path = visualize_metrics(reports, output)
     console.print(f"[green]✓[/green] Saved: [bold]{path}[/bold]")
+
+    if show:
+        _try_render_image_in_terminal(Path(path))
 
 
 @app.command()
@@ -880,30 +989,4 @@ def info() -> None:
     console.print(table)
 
 
-@app.command()
-def clear() -> None:
-    """
-    Delete the knowledge base. You will need to re-run 'cortex add'.
-    """
-
-    import shutil
-
-    from .config import config
-    from .store import count
-
-    if not config.chroma_path.exists():
-        console.print("[dim]No knowledge base to clear.[/dim]")
-        return
-
-    n = count()
-
-    confirm = typer.confirm(
-        f"Delete knowledge base ({n} chunks)? This cannot be undone.",
-        default=False,
-    )
-
-    if confirm:
-        shutil.rmtree(config.chroma_path)
-        console.print("[green]Knowledge base cleared.[/green]")
-    else:
-        console.print("[dim]Aborted.[/dim]")
+## NOTE: `clear()` command is defined earlier in this file.

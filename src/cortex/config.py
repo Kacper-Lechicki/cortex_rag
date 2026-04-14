@@ -1,6 +1,7 @@
 from pathlib import Path
+from urllib.parse import urlparse
 
-from pydantic import field_validator
+from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,7 +66,12 @@ class Config(BaseSettings):
     # --- Scraper / security ---
     # Comma-separated allowlist of domains permitted for scraping.
     # By default, scraping is locked down (empty allowlist).
-    allowed_domains: list[str] = []
+    #
+    # NOTE: pydantic-settings tries to JSON-decode "complex" env values (like list[str])
+    # before validators run, which breaks common .env formats like:
+    #   ALLOWED_DOMAINS="docs.python.org, huggingface.co"
+    # So we read the raw env var as a string, and expose a computed list.
+    allowed_domains_raw: str = Field(default="", validation_alias="ALLOWED_DOMAINS")
     allow_subdomains: bool = False
     max_redirects: int = 3
     deny_private_ips: bool = True
@@ -75,6 +81,7 @@ class Config(BaseSettings):
     log_level: str = "INFO"
     log_max_bytes: int = 1_000_000
     log_backups: int = 3
+
 
     # --- @property: computed attribute ---
     # A @property looks like an attribute but is computed on access.
@@ -87,28 +94,34 @@ class Config(BaseSettings):
 
         return Path(self.chroma_dir)
 
-    @field_validator("allowed_domains", mode="before")
+
+    @computed_field  # type: ignore[misc]
+    @property
+    def allowed_domains(self) -> list[str]:
+        return self._allowed_domains_from_raw(self.allowed_domains_raw)
+
+
     @classmethod
-    def _parse_allowed_domains(cls, v):  # noqa: ANN001
-        if v is None:
+    def _allowed_domains_from_raw(cls, raw: str | None) -> list[str]:
+        if not raw:
             return []
 
-        if isinstance(v, list):
-            return [str(x).strip().lower().strip(".") for x in v if str(x).strip()]
+        parts = [p.strip() for p in raw.strip().replace(";", ",").split(",")]
+        domains: list[str] = []
+        for part in parts:
+            if not part:
+                continue
 
-        if isinstance(v, str):
-            raw = v.strip()
+            p = part
+            if "://" in p:
+                parsed = urlparse(p)
+                p = parsed.netloc or parsed.path
 
-            if not raw:
-                return []
+            p = p.strip().split("/")[0].strip().lower().strip(".")
+            if p:
+                domains.append(p)
 
-            parts = [
-                p.strip().lower().strip(".") for p in raw.replace(";", ",").split(",")
-            ]
-
-            return [p for p in parts if p]
-            
-        return v
+        return domains
 
 
 # Module-level singleton: one Config instance shared across the whole app.

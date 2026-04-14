@@ -84,8 +84,17 @@ def retry(max_attempts: int = 3, base_delay: float = 2.0) -> Callable[[F], F]:
                 except httpx.HTTPError as e:
                     last_error = e
 
+                    # Do not retry on non-retryable HTTP client errors (except 429).
+                    # Retrying 400/401/403/404 etc. just adds latency and noise.
+                    if isinstance(e, httpx.HTTPStatusError):
+                        code = e.response.status_code
+
+                        if 400 <= code < 500 and code != 429:
+                            raise
+
                     if attempt < max_attempts:
                         delay = base_delay * (2 ** (attempt - 1))
+                        
                         log.warning(
                             "HTTP error in %s (attempt %d/%d): %s; sleeping %.0fs",
                             func.__name__,
@@ -206,11 +215,23 @@ def _extractive_answer(question: str, context: str) -> str:
     with the question. This is strictly extractive (no hallucinations).
     """
 
-    q_tokens = [
-        t for t in re.findall(r"[\wąćęłńóśźż]+", question.lower()) if len(t) >= 3
-    ]
+    def _tokens(text: str) -> list[str]:
+        # Normalize common "run-together" brand terms (e.g. HuggingFace vs Hugging Face)
+        # by splitting CamelCase into words before tokenization.
+        spaced = re.sub(r"([a-ząćęłńóśźż])([A-Z])", r"\1 \2", text)
+        return [t for t in re.findall(r"[\wąćęłńóśźż]+", spaced.lower()) if len(t) >= 3]
 
-    q_keys = {t[:4] for t in q_tokens if len(t) >= 4} | set(q_tokens)
+    def _keys(tokens: list[str]) -> set[str]:
+        # Add:
+        # - full tokens (e.g. "hugging", "face")
+        # - 4-char prefixes (helps minor morphology variance)
+        # - bigrams concatenated (e.g. "huggingface") to bridge space/no-space variants
+        out: set[str] = set(tokens)
+        out |= {t[:4] for t in tokens if len(t) >= 4}
+        out |= {tokens[i] + tokens[i + 1] for i in range(len(tokens) - 1)}
+        return out
+
+    q_keys = _keys(_tokens(question))
 
     # Split context into sentences (best-effort).
     sentences = [
@@ -220,14 +241,27 @@ def _extractive_answer(question: str, context: str) -> str:
     scored: list[tuple[int, str]] = []
 
     for s in sentences:
-        s_tokens = [t for t in re.findall(r"[\wąćęłńóśźż]+", s.lower()) if len(t) >= 3]
-        s_keys = {t[:4] for t in s_tokens if len(t) >= 4} | set(s_tokens)
+        s_keys = _keys(_tokens(s))
         score = len(q_keys & s_keys)
        
         if score > 0:
             scored.append((score, s))
 
     if not scored:
+        # If retrieval returned something but overlap scoring fails (common with
+        # very short or oddly tokenized questions), fall back to a short excerpt
+        # from the top chunk. Still strictly extractive, but more useful UX.
+        top_chunk = context.split("\n\n---\n\n", 1)[0].strip()
+        if top_chunk:
+            top_sentences = [
+                s.strip()
+                for s in re.split(r"(?<=[.!?])\s+|\n+", top_chunk)
+                if s.strip()
+            ]
+            excerpt = " ".join(top_sentences[:2]).strip()
+            if excerpt:
+                return excerpt[:800] if len(excerpt) > 800 else excerpt
+
         return "I don't have enough information in my knowledge base to answer this."
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -290,7 +324,9 @@ def generate_answer(question: str, context: str) -> str:
                 "- If the context is insufficient or does not contain the answer, reply exactly:\n"
                 "  I don't have enough information in my knowledge base to answer this.\n"
                 "- Do not guess. Do not add facts not present in the context.\n"
-                "- Keep the answer short and factual."
+                "- Keep the answer short and factual.\n"
+                "- When you use information from the context, include a brief Sources section at the end.\n"
+                "  Sources must be URLs that appear in the context (no new links).\n"
             ),
         },
         {
@@ -299,8 +335,18 @@ def generate_answer(question: str, context: str) -> str:
         },
     ]
 
+    insufficient = "I don't have enough information in my knowledge base to answer this."
+
     try:
-        return _chat_completion(messages, max_tokens=512, temperature=0.1)
+        out = _chat_completion(messages, max_tokens=512, temperature=0.1).strip()
+        if out == insufficient:
+            # If the model declines but we do have retrieved text, prefer a strictly
+            # extractive snippet over a hard "no answer" for reliability/UX.
+            extracted = _extractive_answer(question, context).strip()
+            if extracted and extracted != insufficient:
+                return extracted
+
+        return out
     except Exception as e:
         msg = str(e).lower()
 
@@ -329,20 +375,27 @@ def generate_query_variants(query: str, n: int = 3) -> list[str]:
         List of query strings starting with the original, followed by variants.
     """
 
-    text = _chat_completion(
-        messages=[
-            {
-                "role": "system",
-                "content": "Generate diverse search queries. Return ONLY numbered queries, one per line. No explanations.",
-            },
-            {
-                "role": "user",
-                "content": f"Generate {n} different ways to search for information about:\n'{query}'",
-            },
-        ],
-        max_tokens=200,
-        temperature=0.7,
-    )
+    try:
+        text = _chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Generate diverse search queries. Return ONLY numbered queries, one per line. No explanations.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Generate {n} different ways to search for information about:\n'{query}'",
+                },
+            ],
+            max_tokens=200,
+            temperature=0.7,
+        )
+    except Exception as e:
+        # Query expansion is an optimization; if it fails, we still want retrieval to work.
+        log = get_logger(__name__)
+        log.warning("Query expansion failed; continuing without variants: %s", e)
+
+        return [query]
 
     variants: list[str] = [query]  # Always include the original query first
 

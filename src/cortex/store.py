@@ -27,6 +27,29 @@ _client: Any | None = None
 _collection: Any | None = None
 
 
+def reset_store() -> None:
+    """
+    Reset the module-level Chroma singletons.
+
+    This is necessary when the underlying on-disk store is deleted (e.g. `cortex clear`)
+    during the same process lifetime. Otherwise, we can keep a stale in-memory client
+    that points at removed files and later writes may fail.
+    """
+
+    global _client, _collection
+
+    # Chroma's Rust backend holds file handles; just dropping references is not enough.
+    # Best-effort close to release locks before the store directory is deleted.
+    if _client is not None:
+        try:
+            _client.close()
+        except Exception:
+            pass
+
+    _collection = None
+    _client = None
+
+
 @contextmanager
 def _status(message: str):
     """
@@ -66,6 +89,11 @@ def _get_collection():
     import time
 
     global _client, _collection  # We need to modify module-level variables
+
+    # If the on-disk store was deleted while this process is still alive (e.g. via
+    # `cortex clear`), the cached client/collection becomes stale. Reset and re-init.
+    if _collection is not None and not config.chroma_path.exists():
+        reset_store()
 
     if _collection is not None:
         return _collection  # Already initialized - return immediately
